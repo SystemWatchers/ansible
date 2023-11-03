@@ -4,7 +4,7 @@
   vars:
     ip: 192.168.1.50
     hostname: demo
-    password: system12m
+    password: change_me
   tasks:
     - name: Update and upgrade apt packages
       apt:
