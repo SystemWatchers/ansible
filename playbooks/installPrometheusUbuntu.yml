@@ -1,0 +1,166 @@
+---
+- hosts: prometheus-ubuntu
+  become: yes
+  vars:
+    ip: 192.168.1.46
+    hostname: prometheus-ubuntu
+    password: system12m
+  tasks:
+    - name: Update and upgrade apt packages
+      apt:
+        update_cache: yes
+        upgrade: 'yes'
+
+    - name: Install prometheus
+      apt:
+        name: prometheus
+        state: present
+
+    - name: Add entries to /etc/hosts
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ item }}"
+      loop:
+        - "##PROMETHEUS"
+        - "{{ ip }} {{ hostname }}.home.lab"
+        - "{{ ip }} {{ hostname }}-node.home.lab"
+
+    - name: Install nginx
+      apt:
+        name: nginx
+        state: present
+
+    - name: Create nginx configuration for prometheus
+      blockinfile:
+        path: /etc/nginx/sites-enabled/prometheus
+        create: yes
+        block: |
+          server {
+            listen 80;
+            listen [::]:80;
+            server_name {{ hostname }}.home.lab;
+            location / {
+              proxy_pass http://localhost:9090/;
+            }
+          }
+
+    - name: Create nginx configuration for prometheus-node
+      blockinfile:
+        path: /etc/nginx/sites-enabled/prometheus-node
+        create: yes
+        block: |
+          server {
+            listen 80;
+            listen [::]:80;
+            server_name {{ hostname }}-node.home.lab;
+            location / {
+              proxy_pass http://localhost:9100/;
+            }
+          }
+
+    - name: Restart nginx
+      systemd:
+        name: nginx
+        state: restarted
+
+    - name: Generate self-signed certificate
+      command:
+        cmd: openssl req -x509 -nodes -days 1365 -newkey rsa:2048 -keyout /etc/ssl/private/nginx-selfsigned.key -out /etc/ssl/certs/nginx-selfsigned.crt -subj "/CN={{ hostname }}.home.lab"
+
+    - name: Generate dhparam.pem
+      command:
+        cmd: openssl dhparam -out /etc/ssl/certs/dhparam.pem 2048
+    - name: Install apache2-utils
+      apt:
+        name: apache2-utils
+        state: present
+
+    - name: Create admin user
+      command: htpasswd -b -c /etc/nginx/.htpasswd admin "{{ password }}"
+
+    - name: Update default nginx configuration
+      copy:
+        dest: /etc/nginx/sites-available/default
+        content: |
+          server {
+            listen 80 default_server;
+            listen [::]:80 default_server;
+            # SSL configuration
+            listen 443 ssl default_server;
+            listen [::]:443 ssl default_server;
+            ssl_certificate /etc/ssl/certs/nginx-selfsigned.crt;
+            ssl_certificate_key /etc/ssl/private/nginx-selfsigned.key;
+            ssl_dhparam /etc/ssl/certs/dhparam.pem;
+            }
+
+    - name: Update prometheus nginx configuration
+      blockinfile:
+        path: /etc/nginx/sites-enabled/prometheus
+        block: |
+          server {
+            listen 80;
+            server_name {{ hostname }}.home.lab {{ hostname }};
+            return 301 https://$host$request_uri;
+          }
+          server {
+            listen 443 ssl http2;
+            server_name {{ hostname }}.home.lab {{ hostname }};
+            ssl_certificate /etc/ssl/certs/nginx-selfsigned.crt;
+            ssl_certificate_key /etc/ssl/private/nginx-selfsigned.key;
+            auth_basic "Protected Area";
+            auth_basic_user_file /etc/nginx/.htpasswd;
+
+            location / {
+              proxy_pass http://localhost:9090;
+              proxy_set_header Host $host;
+            }
+          }
+
+    - name: Update prometheus-node nginx configuration
+      blockinfile:
+        path: /etc/nginx/sites-enabled/prometheus-node
+        block: |
+          server {
+            listen 80;
+            server_name {{ hostname }}-node.home.lab {{ hostname }}-node;
+            return 301 https://$host$request_uri;
+          }
+          server {
+            listen 443 ssl http2;
+            server_name {{ hostname }}-node.home.lab {{ hostname }}-node;
+            ssl_certificate /etc/ssl/certs/nginx-selfsigned.crt;
+            ssl_certificate_key /etc/ssl/private/nginx-selfsigned.key;
+            #additional authentication properties
+            #auth_basic "Protected Area";
+            #auth_basic_user_file /etc/nginx/.htpasswd;
+            location / {
+              proxy_pass http://localhost:9100;
+              proxy_set_header Host $host;
+            }
+          }
+
+    - name: Restart nginx
+      systemd:
+        name: nginx
+        state: restarted
+
+    - name: Install iptables-persistent
+      apt:
+        name: iptables-persistent
+        state: present
+
+    - name: Set iptables rules
+      shell: |
+        iptables -A INPUT -p tcp -s localhost --dport 9090 -j ACCEPT
+        iptables -A INPUT -p tcp --dport 9090 -j DROP
+        iptables -A INPUT -p tcp -s localhost --dport 9100 -j ACCEPT
+        iptables -A INPUT -p tcp --dport 9100 -j DROP
+        iptables-save > /etc/iptables/rules.v4
+        iptables-save > /etc/iptables/rules.v6
+
+    - name: List iptables rules
+      command: iptables -L
+      register: iptables_list
+
+    - debug:
+        var: iptables_list.stdout_lines

@@ -1,0 +1,26 @@
+---
+- hosts: demo
+  become: yes
+  tasks:
+    - name: Add Grafana's official repository
+      apt_repository:
+        repo: deb https://packages.grafana.com/oss/deb stable main
+        state: present
+
+    - name: Import Grafana's signing key
+      apt_key:
+        url: https://packages.grafana.com/gpg.key
+        state: present
+
+    - name: Update repositories cache and install Grafana
+      apt:
+        name: grafana
+        update_cache: yes
+        state: latest
+
+    - name: Enable and start Grafana service
+      systemd:
+        name: grafana-server
+        enabled: yes
+        state: started
+
